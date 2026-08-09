@@ -1,0 +1,16 @@
+[project]
+name = "h3_sage_amd"
+version = "1.0.0"
+description = "AMD gfx12 Memory-Efficient Sage Attention for MiniMax H3"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "sageattention>=2.2.0",
+    "torch>=2.10.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-username/h3_sage_amd"
+
+[tool.setuptools]
+packages = ["h3_sage_amd"]
