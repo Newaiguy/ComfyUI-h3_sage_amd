@@ -8,7 +8,7 @@ AMD gfx12 (RX 9070 / 9070 XT) 专用的 MiniMax H3 记忆体高效 Sage Attentio
 
 - **省显存 33%**：在 attention 前释放 qkv buffer，峰值 VRAM 降低约 1/3
 - **性能追平 N 卡**：使用编译好的 gfx12 native HIP kernel（61MB），比纯 Triton 路径快 15-20%
-- **H3 工作流实测**：RX 9070 XT 采样 10 步约 350s，与 RTX 4070 Ti 的 ~300s 差距 < 17%
+- **H3 工作流实测**：RX 9070 XT 采样 10 步约 300s，与 RTX 4070 Ti 的 ~300s 一致（使用 Work-Fisher 8月8日工作流测试）
 
 ## 适用 GPU
 
