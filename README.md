@@ -22,7 +22,7 @@ AMD gfx12 (RX 9070 / 9070 XT) 专用的 MiniMax H3 记忆体高效 Sage Attentio
 - 链接：https://pan.quark.cn/s/da1aeaa701cd
 - 提取码：`Bg47`
 
-包含：预编译 SageAttention（含 61MB gfx12 native kernel）+ h3_sage_amd 节点 + AMD 专用补丁 + 启动脚本 + 完整构建指南。
+包含：预编译 SageAttention（含 61MB gfx12 native kernel，支持 Python 3.12 + 3.13）+ h3_sage_amd 节点 + AMD 专用补丁 + 启动脚本 + 完整构建指南。
 
 ## 原理
 
@@ -61,7 +61,8 @@ ComfyUI/custom_nodes/h3_sage_amd/
 
 1. **SageAttention 2.2.0+ with gfx12 native support**
 
-   需要编译好的 `_qattn_gfx12_native.cp313-win_amd64.pyd`（61MB）。
+   需要编译好的 `_qattn_gfx12_native.cp312-win_amd64.pyd` 或 `_qattn_gfx12_native.cp313-win_amd64.pyd`（61MB）。
+   预编译包同时包含 Python 3.12 和 3.13 两个版本，自动适配。
    来源：[SageAttention PR #368](https://github.com/thu-ml/SageAttention/pull/368)
 
    如果没有自行编译的条件，可使用预编译包（见 release）。
