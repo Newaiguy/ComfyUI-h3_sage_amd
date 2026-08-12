@@ -222,8 +222,13 @@ class MiniMaxH3SageAttentionPatchAMD:
 
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3SageAttentionPatchAMD": MiniMaxH3SageAttentionPatchAMD,
+    # Alias: KJNodes' N卡 node name — AMD auto-fallback so existing
+    # workflows (Work-Fisher integrated, dual-clock sampling, etc.)
+    # that reference this node type work without modification.
+    "MiniMaxH3MemoryEfficientSageAttentionPatch": MiniMaxH3SageAttentionPatchAMD,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3SageAttentionPatchAMD": "MiniMax H3 Mem Eff Sage Attn (AMD)",
+    "MiniMaxH3MemoryEfficientSageAttentionPatch": "MiniMax H3 Mem Eff Sage Attn (AMD alias)",
 }
