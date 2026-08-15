@@ -1,87 +1,59 @@
-"""AMD-compatible Memory-Efficient Sage Attention for MiniMax H3.
+"""AMD-compatible Sage Attention for MiniMax H3.
 
-Mirrors kjnodes' MiniMaxH3MemoryEfficientSageAttentionPatch but uses
-gfx12 native HIP kernels instead of CUDA-only _qattn_smXX kernels,
-enabling ~33% peak VRAM savings on AMD gfx12 GPUs.
+For normal sequences this node is a transparent pass-through: it delegates to
+the original H3 attention path (``optimized_attention`` → global sage when
+``--use-sage-attention`` is on), so there is zero speed overhead.
 
-Primary path: sageattn_qk_int8_pv_gfx12_native (compiled 61MB HIP C++ kernel,
-equivalent to N卡 _qattn_sm80/sm89 path). Does smooth_k + int8 quantization +
-attention in one fused pass.
-Fallback: per_block_int8_triton + attn_false (pure Triton, sm75-equivalent).
+Its only value is VRAM safety on very long sequences (seq > 30000, e.g.
+Ref2VA dual-clock sampling), where head-chunking cuts peak VRAM enough to
+avoid the OOM/GPU-hang that the unpatched path hits on 16 GB gfx12 GPUs.
 """
 
 import logging
+import os
+import time
 import torch
 
 import comfy.model_management as mm
+from comfy.ldm.modules.attention import optimized_attention
 from comfy.quant_ops import ck as _ck
 
 try:
-    from sageattention.core import sageattn_qk_int8_pv_gfx12_native
-    from sageattention.core import GFX12_NATIVE_ENABLED
-    _NATIVE_GFX12_AVAILABLE = GFX12_NATIVE_ENABLED
-except (ImportError, AttributeError):
-    _NATIVE_GFX12_AVAILABLE = False
-
-try:
-    from sageattention.core import per_block_int8_triton, attn_false
-    _TRITON_FALLBACK_AVAILABLE = True
+    from sageattention import sageattn
+    _SAGE_AVAILABLE = True
 except ImportError:
-    _TRITON_FALLBACK_AVAILABLE = False
+    _SAGE_AVAILABLE = False
 
-_SAGE_AVAILABLE = _NATIVE_GFX12_AVAILABLE or _TRITON_FALLBACK_AVAILABLE
+# Auto head-chunking for very long sequences (e.g. Ref2VA dual-clock
+# sampling, seq > 30k), where keeping full fp16 q/k/v copies plus the
+# qkv buffer alive would otherwise blow past 16 GB VRAM.
+AUTO_CHUNK_THRESHOLD = 30000
+AUTO_CHUNK_HEADS = 4
+
+# Debug probe: create the flag file to log per-call seq/branch/timing to
+# L:\ComfyUI_windows_portable\h3_attn_debug.log (delete file to disable).
+_DEBUG_FLAG = r"L:\ComfyUI_windows_portable\h3_debug_on"
+_DEBUG_LOG = r"L:\ComfyUI_windows_portable\h3_attn_debug.log"
 
 
-def _sageattn_int8_fp16_nhd_amd(q, k, v, dtype):
-    """int8 sage attention for AMD gfx12.
-
-    Prefers native HIP kernel (sageattn_qk_int8_pv_gfx12_native) which is
-    a compiled C++ kernel equivalent to N卡 _qattn_sm80/sm89 path. The native
-    kernel does smooth_k + per_warp int8 quantization + attention in one
-    fused pass — faster than the Triton fallback.
-
-    Falls back to per_block_int8_triton + attn_false (pure Triton,
-    sm75-equivalent) if native module unavailable.
+def _sageattn_fp16_nhd_amd(q, k, v, dtype):
+    """fp16/bf16 sage attention (same kernel as global --use-sage-attention).
 
     q, k, v: fp16 tensors in NHD layout [batch, seq, heads, head_dim].
     Returns output in NHD layout with the given dtype.
     """
-    if _NATIVE_GFX12_AVAILABLE:
-        # Native HIP kernel: fused smooth_k + int8 quant + attention.
-        # No need to manually smooth_k or quantize — the kernel does it all.
-        o = sageattn_qk_int8_pv_gfx12_native(
-            q, k, v,
-            tensor_layout="NHD",
-            is_causal=False,
-            value_dtype="fp16",
-        )
-        del q, k, v
-        return o.to(dtype)
-
-    # Triton fallback (sm75-equivalent path)
-    k.sub_(k.mean(dim=1, keepdim=True))
-    sm_scale = q.shape[-1] ** -0.5
-    q_int8, q_scale, k_int8, k_scale = per_block_int8_triton(
-        q, k, sm_scale=sm_scale, tensor_layout="NHD",
-    )
-    del q, k
-    o, _ = attn_false(
-        q_int8, k_int8, v, q_scale, k_scale,
-        tensor_layout="NHD", output_dtype=dtype, attn_mask=None, return_lse=False,
-    )
-    del q_int8, q_scale, k_int8, k_scale, v
-    return o
+    o = sageattn(q, k, v, tensor_layout="NHD", is_causal=False, smooth_k=False)
+    del q, k, v
+    return o.to(dtype)
 
 
 def minimax_sageattn_forward_amd(self, x, rope_freqs=None, transformer_options={}):
     """AMD-compatible replacement for H3 Attention.forward.
 
-    Same structure as kjnodes' minimax_sageattn_forward but calls
-    _sageattn_int8_fp16_nhd_amd instead of the CUDA-only _sageattn_int8_fp8_nhd.
-
-    Key memory optimization: convert q/k/v to fp16 (independent copies),
-    then free the qkv buffer BEFORE running attention. This saves ~33%
-    peak VRAM compared to keeping qkv buffer alive during attention.
+    Normal sequences (seq <= 30000) delegate to the original H3 attention
+    path (``optimized_attention``), matching global sage attention with zero
+    overhead. Very long sequences (seq > 30000) use head-chunked fp16 sage
+    attention to cut peak VRAM.
     """
     # List pop trick (compatible with MiniMaxLowVRAMAttention block patch)
     if isinstance(x, list):
@@ -90,6 +62,8 @@ def minimax_sageattn_forward_amd(self, x, rope_freqs=None, transformer_options={
     s = x.shape[0]
     device = x.device
     dtype = x.dtype
+    dbg = os.path.exists(_DEBUG_FLAG)
+    t0 = time.perf_counter() if dbg else 0.0
 
     # QKV projection - free input immediately
     qkv = self.qkv_proj(x)
@@ -123,17 +97,28 @@ def minimax_sageattn_forward_amd(self, x, rope_freqs=None, transformer_options={
         if isinstance(transformer_options, dict)
         else 1
     )
+    # Auto-enable head-chunking for very long sequences (e.g. Ref2VA
+    # dual-clock sampling, seq=41414) so the fp16 q/k/v copies plus the
+    # qkv buffer don't blow past 16 GB VRAM.
+    if n <= 1 and s > AUTO_CHUNK_THRESHOLD:
+        n = min(AUTO_CHUNK_HEADS, self.heads)
 
     if n <= 1:
-        # Full attention with progressive freeing
-        # Convert to fp16 (independent copies), then free qkv buffer
-        q_fp16 = q.to(torch.float16)
-        k_fp16 = k.to(torch.float16)
-        v_fp16 = v.to(torch.float16)
-        del q, k, v, qkv  # qkv buffer freed here
-
-        o = _sageattn_int8_fp16_nhd_amd(q_fp16, k_fp16, v_fp16, dtype)
-        return self.out_proj(o.view(s, self.heads * self.head_dim))
+        # Normal sequence: delegate straight to the original H3 attention
+        # path (optimized_attention, which global --use-sage-attention
+        # hooks). Zero overhead vs the unpatched model for seq <= 30000.
+        q = q.transpose(1, 2)  # NHD [1,s,h,d] -> HND [1,h,s,d]
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        out = optimized_attention(
+            q, k, v, self.heads, mask=None, skip_reshape=True,
+            transformer_options=transformer_options,
+        )
+        ta = time.perf_counter() - t0
+        if dbg:
+            with open(_DEBUG_LOG, "a", buffering=1) as f:
+                f.write("delegate\t%d\t%d\t%.4f\n" % (s, n, ta))
+        return self.out_proj(out.squeeze(0))
 
     # Head-chunks: process per head group to reduce peak VRAM
     out = torch.empty((s, self.heads * self.head_dim), dtype=dtype, device=device)
@@ -144,22 +129,24 @@ def minimax_sageattn_forward_amd(self, x, rope_freqs=None, transformer_options={
         q_fp16 = q[:, :, hs:he, :].to(torch.float16).contiguous()
         k_fp16 = k[:, :, hs:he, :].to(torch.float16).contiguous()
         v_fp16 = v[:, :, hs:he, :].to(torch.float16).contiguous()
-        o = _sageattn_int8_fp16_nhd_amd(q_fp16, k_fp16, v_fp16, dtype)
+        o = _sageattn_fp16_nhd_amd(q_fp16, k_fp16, v_fp16, dtype)
         out_nhd[:, :, hs:he, :] = o
         del o
         hs = he
     del q, k, v, qkv
+    ta = time.perf_counter() - t0
+    if dbg:
+        with open(_DEBUG_LOG, "a", buffering=1) as f:
+            f.write("chunks\t%d\t%d\t%.4f\n" % (s, n, ta))
     return self.out_proj(out)
 
 
 class MiniMaxH3SageAttentionPatchAMD:
-    """AMD-compatible Memory Efficient Sage Attention Patch for MiniMax H3.
+    """AMD-compatible Sage Attention Patch for MiniMax H3.
 
-    Uses gfx12 native HIP kernel (sageattn_qk_int8_pv_gfx12_native) that
-    matches the N卡 _qattn_smXX path in performance. Falls back to Triton
-    (attn_false) if native module unavailable.
-
-    Saves ~33% peak VRAM by freeing the qkv buffer before attention runs.
+    fp16 sageattn for normal sequences. Lowers peak VRAM on long sequences
+    (seq > 30000) via auto head-chunking, avoiding the OOM/GPU-hang that
+    the unpatched path hits on 16 GB gfx12 GPUs.
 
     Compatible with:
     - --use-sage-attention startup flag (this patch takes over for H3 attention)
@@ -174,10 +161,10 @@ class MiniMaxH3SageAttentionPatchAMD:
     FUNCTION = "patch"
     CATEGORY = "KJNodes/minimax"
     DESCRIPTION = (
-        "AMD-compatible memory efficient sage attention for MiniMax H3. "
-        "Uses gfx12 native HIP kernel (fast, like N卡 _qattn_smXX) with "
-        "Triton fallback. Saves ~33% peak VRAM by freeing the qkv buffer "
-        "before attention. Works on AMD gfx12 (RX 9070 XT)."
+        "AMD-compatible sage attention for MiniMax H3. Transparent for "
+        "normal sequences (delegates to optimized_attention). Lowers peak "
+        "VRAM on long sequences via auto head-chunking (seq > 30000). "
+        "Works on AMD gfx12 (RX 9070 XT)."
     )
 
     def patch(self, model):
