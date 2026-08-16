@@ -91,12 +91,6 @@ ComfyUI/custom_nodes/h3_sage_amd/
 - 也兼容 `MiniMaxLowVRAMAttention` 的 `minimax_head_chunks` transformer_option 和
   block 级 list 传参，可组合使用
 
-### 调试探针（可选）
-
-创建空文件 `ComfyUI根目录/h3_debug_on`（或修改 `nodes.py` 中 `_DEBUG_FLAG` 路径）
-后，每次 attention 调用会向 `h3_attn_debug.log` 追加一行 `分支/seq/n/耗时`，用于
-确认实际走的代码路径。删除该文件即关闭。
-
 ## 与 N卡 KJNodes 节点的关系
 
 | 对比项 | KJNodes (N卡) | 本节点 (AMD) |

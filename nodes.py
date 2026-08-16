@@ -10,8 +10,6 @@ avoid the OOM/GPU-hang that the unpatched path hits on 16 GB gfx12 GPUs.
 """
 
 import logging
-import os
-import time
 import torch
 
 import comfy.model_management as mm
@@ -29,11 +27,6 @@ except ImportError:
 # qkv buffer alive would otherwise blow past 16 GB VRAM.
 AUTO_CHUNK_THRESHOLD = 30000
 AUTO_CHUNK_HEADS = 4
-
-# Debug probe: create the flag file to log per-call seq/branch/timing to
-# L:\ComfyUI_windows_portable\h3_attn_debug.log (delete file to disable).
-_DEBUG_FLAG = r"L:\ComfyUI_windows_portable\h3_debug_on"
-_DEBUG_LOG = r"L:\ComfyUI_windows_portable\h3_attn_debug.log"
 
 
 def _sageattn_fp16_nhd_amd(q, k, v, dtype):
@@ -62,8 +55,6 @@ def minimax_sageattn_forward_amd(self, x, rope_freqs=None, transformer_options={
     s = x.shape[0]
     device = x.device
     dtype = x.dtype
-    dbg = os.path.exists(_DEBUG_FLAG)
-    t0 = time.perf_counter() if dbg else 0.0
 
     # QKV projection - free input immediately
     qkv = self.qkv_proj(x)
@@ -114,10 +105,6 @@ def minimax_sageattn_forward_amd(self, x, rope_freqs=None, transformer_options={
             q, k, v, self.heads, mask=None, skip_reshape=True,
             transformer_options=transformer_options,
         )
-        ta = time.perf_counter() - t0
-        if dbg:
-            with open(_DEBUG_LOG, "a", buffering=1) as f:
-                f.write("delegate\t%d\t%d\t%.4f\n" % (s, n, ta))
         return self.out_proj(out.squeeze(0))
 
     # Head-chunks: process per head group to reduce peak VRAM
@@ -134,10 +121,6 @@ def minimax_sageattn_forward_amd(self, x, rope_freqs=None, transformer_options={
         del o
         hs = he
     del q, k, v, qkv
-    ta = time.perf_counter() - t0
-    if dbg:
-        with open(_DEBUG_LOG, "a", buffering=1) as f:
-            f.write("chunks\t%d\t%d\t%.4f\n" % (s, n, ta))
     return self.out_proj(out)
 
 
